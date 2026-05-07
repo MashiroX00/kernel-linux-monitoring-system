@@ -1,7 +1,8 @@
-# How to Compile & Install — ESP32 CPU Load Monitor
+# How to Compile & Run — ESP32 CPU Load Monitor
 
-> Environment: **Ubuntu VM** | Kernel: **6.17.13** | Arduino IDE: **2.x**
+> Environment: **Ubuntu VM (VMware Workstation)** | Kernel: **6.17.13** | Arduino IDE: **2.x**
 
+---
 ## 1. ความต้องการของระบบ
 
 ### Linux (Ubuntu VM)
@@ -11,8 +12,8 @@
 | OS | Ubuntu 22.04 / 24.04 |
 | Kernel | 6.17.13 (ต้องตรงกับที่รัน driver) |
 | RAM | 4GB ขั้นต่ำ (แนะนำ 8GB+) |
-| Disk | 20GB+ สำหรับ kernel headers |
-| Tools | `build-essential`, `linux-headers` |
+| Disk | 20GB+ |
+| Tools | `build-essential`, `linux-headers`, `git` |
 
 ### ESP32
 
@@ -21,95 +22,205 @@
 | บอร์ด | ESP32 DevKit V1 |
 | Arduino IDE | 2.x |
 | Board Package | esp32 by Espressif Systems ≥ 2.0 |
-| สาย | USB-A to Micro-USB (data cable) |
+| สาย | USB-A to Micro-USB (**data cable** — ไม่ใช่ charge-only) |
+| CPU Frequency | 80 MHz (ตั้งใน firmware แล้ว) |
 
 ---
 
-## 2. คอมไพล์ Kernel Driver (`esp32_monitor.c`)
+## 2. ตั้งค่า VMware USB Passthrough
 
-### ขั้นตอนที่ 1 — ติดตั้ง dependencies
+> ⚠️ **ข้ามขั้นตอนนี้ไม่ได้** — ถ้าไม่ทำ VM จะไม่เห็น ESP32 เลยแม้เสียบสายแล้ว
 
-```bash
-sudo apt update
-sudo apt install -y build-essential libncurses-dev libssl-dev libelf-dev bison flex gcc make wget bc fakeroot dwarves zstd install-info gawk debhelper libdw-dev
-```
+### วิธีที่ 1: Connect แบบ Manual (ขณะ VM รันอยู่)
 
+1. เสียบสาย USB ESP32 เข้าเครื่อง Windows
+2. บน VMware menu bar: **VM → Removable Devices**
+3. เลือก **QinHeng USB Single Serial** (หรือชื่ออุปกรณ์ที่ปรากฏ)
+4. คลิก **Connect (Disconnect from Host)**
 
-### ขั้นตอนที่ 2 — ดาวน์โหลดและแตกไฟล์ Kernel
-
-สร้างไฟล์ `Makefile` ในโฟลเดอร์เดียวกับ `esp32_monitor.c`:
-
-```bash
-mkdir -p ~/kernel && cd ~/kernel
-wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.17.13.tar.xz
-tar -xf linux-6.17.13.tar.xz
-cd linux-6.17.13
-```
-###  ขั้นตอนที่ 3 — แทรกโค้ด Driver
-
-1. นำไฟล์ esp32_monitor.c (ที่คุณมี) ไปวางใน drivers/char/  
-2. แก้ไขไฟล์ drivers/char/Kconfig โดยเพิ่มโค้ดนี้ต่อท้าย:
-```Kconfig
-config ESP32_MONITOR
-    tristate "ESP32 CPU Load Monitor Support"
-    default y
-```
-
-3. แก้ไขไฟล์ drivers/char/Makefile โดยเพิ่มโค้ดนี้ต่อท้าย:  
-```makefile
-obj-$(CONFIG_ESP32_MONITOR) += esp32_monitor.o
-```
-
-> ⚠️ **สำคัญ:** บรรทัด `make -C ...` ต้องใช้ **Tab** ไม่ใช่ Space
-
-### ขั้นตอนที่ 4 — ตั้งค่า Kernel
+ตรวจสอบ:
 
 ```bash
-# ดึง config ปัจจุบันมาใช้
-cp /boot/config-$(uname -r) .config
+lsusb | grep -i "QinHeng\|CH34\|Silicon\|CP21"
+# ควรเห็น: ID 1a86:55d4 QinHeng Electronics USB Single Serial
+```
 
-# ปิดระบบความปลอดภัยและระบบ Debug เพื่อประหยัด RAM/Disk
-scripts/config --disable SYSTEM_TRUSTED_KEYS
-scripts/config --disable SYSTEM_REVOCATION_KEYS
-scripts/config --disable DEBUG_INFO
-scripts/config --disable CONFIG_DEBUG_INFO_BTF
+### วิธีที่ 2: USB Filter (Auto-connect ทุกครั้ง — แนะนำ)
 
-# เปิดใช้งาน Driver ของเรา
-scripts/config --enable CONFIG_ESP32_MONITOR
+1. ปิด VM ก่อน
+2. **VM → Settings → USB Controller → Add Filter**
+3. เลือก ESP32 → Save → เปิด VM ใหม่
 
-# ยืนยันการตั้งค่า
+---
+
+## 3. ตรวจสอบ USB-Serial Chip ของ ESP32
+
+```bash
+lsusb
+```
+
+เทียบ USB ID กับตารางนี้เพื่อดูว่าต้องติดตั้ง driver เพิ่มหรือไม่:
+
+| USB ID | Chip | ต้องทำอะไรเพิ่ม | Device Node |
+|--------|------|----------------|------------|
+| `1a86:7523` | CH340 | ไม่ต้องทำอะไร | `/dev/ttyUSB0` |
+| **`1a86:55d4`** | **CH343** | **→ ทำขั้นตอนที่ 4** | **`/dev/ttyCH343USB0`** |
+| `10c4:ea60` | CP2102 | ไม่ต้องทำอะไร | `/dev/ttyUSB0` |
+| `0403:6001` | FT232 | ไม่ต้องทำอะไร | `/dev/ttyUSB0` |
+
+ถ้า USB ID **ไม่ใช่** `1a86:55d4` → ข้ามไปขั้นตอนที่ 5 ได้เลย
+
+---
+
+## 4. ติดตั้ง CH343 Driver (เฉพาะ chip `1a86:55d4`)
+
+### วิธีเร็ว: ติดตั้ง module แยก
+
+```bash
+sudo apt install git build-essential linux-headers-$(uname -r)
+
+git clone https://github.com/WCHSoftGroup/ch343ser_linux.git
+cd ch343ser_linux
+make
+sudo make install
+sudo modprobe ch343
+```
+
+ตรวจสอบ:
+
+```bash
+ls /dev/ttyCH343USB*
+# ควรเห็น: /dev/ttyCH343USB0
+```
+
+### วิธี build เข้า Kernel Source (ถ้าจะ compile kernel ใหม่)
+
+```bash
+# 1. copy source เข้า kernel tree
+git clone https://github.com/WCHSoftGroup/ch343ser_linux.git
+cp ch343ser_linux/driver/ch343.c ~/kernel/linux-6.17.13/drivers/usb/serial/
+cp ch343ser_linux/driver/ch343.h ~/kernel/linux-6.17.13/drivers/usb/serial/
+
+# 2. เพิ่มใน Kconfig (ก่อน endmenu)
+cat >> ~/kernel/linux-6.17.13/drivers/usb/serial/Kconfig << 'EOF'
+
+config USB_SERIAL_CH343
+	tristate "USB QinHeng CH343 Single Serial"
+	depends on USB_SERIAL
+	help
+	  Driver for CH343/CH9102 USB serial devices. Module name: ch343.
+EOF
+
+# 3. เพิ่มใน Makefile
+echo 'obj-$(CONFIG_USB_SERIAL_CH343)	+= ch343.o' \
+  >> ~/kernel/linux-6.17.13/drivers/usb/serial/Makefile
+
+# 4. เปิดใช้งาน
+cd ~/kernel/linux-6.17.13
+scripts/config --module CONFIG_USB_SERIAL_CH343
 make olddefconfig
+
+# ตรวจสอบ
+grep CH343 .config
+# ต้องเห็น: CONFIG_USB_SERIAL_CH343=m
 ```
 
-### ขั้นตอนที่ 5 — คอมไพล์และสร้างไฟล์ติดตั้ง
+---
+
+## 5. คอมไพล์และติดตั้ง Kernel Driver
+
+### Clone โปรเจค
 
 ```bash
-make -j12 bindeb-pkg LOCALVERSION=-brc-monitoring
+git clone https://github.com/MashiroX00/kernel-linux-monitoring-system.git
+cd kernel-linux-monitoring-system
 ```
 
-ถ้า VM มี RAM จำกัด (4GB) ให้จำกัด parallel jobs เพื่อป้องกัน OOM:  
+### Option A: Out-of-tree Module (แนะนำ — ไม่ต้อง compile kernel ทั้งหมด)
 
 ```bash
-make -j1
-```
+# ติดตั้ง dependencies
+sudo apt update
+sudo apt install -y build-essential linux-headers-$(uname -r)
 
-ผลลัพธ์ที่ควรได้:
+# ตรวจสอบว่า headers ตรงกับ kernel ที่รันอยู่
+uname -r
+ls /lib/modules/$(uname -r)/build
 
-```
-  CC [M]  /path/to/esp32_monitor.o
-  MODPOST /path/to/Module.symvers
-  CC [M]  /path/to/esp32_monitor.mod.o
-  LD [M]  /path/to/esp32_monitor.ko
-```
+# Build
+make
 
-ตรวจสอบไฟล์ที่ได้:
-
-```bash
+# ตรวจสอบผลลัพธ์
 ls -lh esp32_monitor.ko
 modinfo esp32_monitor.ko
 ```
 
-### ขั้นตอนที่ 6 — ติดตั้ง Kernel ใหม่
+โหลด module:
+
+```bash
+sudo insmod esp32_monitor.ko
+
+# ตรวจสอบ
+dmesg | grep ESP32_MONITOR
+# ควรเห็น: ESP32_MONITOR: Loaded, scanning for ESP32...
+
+ls /dev/esp32_monitor
+```
+
+### Option B: Build เข้า Kernel Source (สำหรับ compile kernel ใหม่ทั้งหมด)
+
+```bash
+# ติดตั้ง dependencies ทั้งหมด
+sudo apt install -y build-essential libncurses-dev libssl-dev libelf-dev \
+  bison flex gcc make wget bc fakeroot dwarves zstd install-info \
+  gawk debhelper libdw-dev git
+
+# ดาวน์โหลด kernel source
+mkdir -p ~/kernel && cd ~/kernel
+wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.17.13.tar.xz
+tar -xf linux-6.17.13.tar.xz
+cd linux-6.17.13
+
+# copy driver เข้า kernel tree
+cp /path/to/kernel-linux-monitoring-system/esp32_monitor.c drivers/char/
+
+# เพิ่มใน drivers/char/Kconfig (ก่อน endmenu)
+cat >> drivers/char/Kconfig << 'EOF'
+
+config ESP32_MONITOR
+	tristate "ESP32 CPU Load Monitor Support"
+	default m
+	help
+	  Sends CPU load to ESP32 via Serial USB using handshake auto-detection.
+EOF
+
+# เพิ่มใน drivers/char/Makefile
+echo 'obj-$(CONFIG_ESP32_MONITOR) += esp32_monitor.o' >> drivers/char/Makefile
+
+# ตั้งค่า kernel
+cp /boot/config-$(uname -r) .config
+scripts/config --disable SYSTEM_TRUSTED_KEYS
+scripts/config --disable SYSTEM_REVOCATION_KEYS
+scripts/config --disable DEBUG_INFO
+scripts/config --disable CONFIG_DEBUG_INFO_BTF
+scripts/config --module CONFIG_ESP32_MONITOR
+make olddefconfig
+
+# Compile (สร้างเป็น .deb)
+make -j$(nproc) bindeb-pkg LOCALVERSION=-brc-monitoring
+```
+
+> ⚠️ ถ้า VM มี RAM 4GB และพัง (OOM) ระหว่าง link:
+> ```bash
+> # เพิ่ม swap ชั่วคราว
+> sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+> sudo mkswap /swapfile && sudo swapon /swapfile
+>
+> # แล้ว compile ด้วย job น้อยลง
+> make -j1 bindeb-pkg LOCALVERSION=-brc-monitoring
+> ```
+
+ติดตั้ง kernel ใหม่:
 
 ```bash
 cd ~/kernel
@@ -118,92 +229,77 @@ sudo update-grub
 sudo reboot
 ```
 
-ตรวจสอบว่าโหลดสำเร็จ:
+หลัง reboot:
 
 ```bash
-dmesg | grep ESP32_MONITOR
-# ควรเห็น:
-# ESP32_MONITOR: Loaded, scanning for ESP32...
-```
-
-ตรวจสอบว่า device ถูกสร้าง:
-
-```bash
-ls -la /dev/esp32_monitor
-cat /sys/class/misc/esp32_monitor/esp32_status
+uname -r
+# ควรเห็น: 6.17.13-brc-monitoring
 ```
 
 ---
 
-## 3. อัปโหลด Firmware ESP32 (`esp32.ino`)
+## 6. อัปโหลด Firmware ลง ESP32
 
-### ขั้นตอนที่ 1 — ติดตั้ง Board Package
+> ทำบน **Windows host** (ไม่ใช่ใน VM) เพราะ Arduino IDE ต้องการ COM port ของ Windows
 
-1. เปิด Arduino IDE 2.x
-2. ไปที่ **File → Preferences**
-3. ใส่ URL ต่อไปนี้ใน **Additional boards manager URLs:**
+### ติดตั้ง Board Package
+
+1. เปิด **Arduino IDE 2.x**
+2. **File → Preferences → Additional boards manager URLs:**
    ```
    https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
    ```
-4. ไปที่ **Tools → Board → Boards Manager**
-5. ค้นหา `esp32` และติดตั้ง **esp32 by Espressif Systems**
+3. **Tools → Board → Boards Manager** → ค้นหา `esp32` → ติดตั้ง **esp32 by Espressif Systems**
 
-### ขั้นตอนที่ 2 — เลือกบอร์ดและพอร์ต
+### อัปโหลด
 
 1. **Tools → Board → esp32 → ESP32 Dev Module**
-2. **Tools → Port → เลือก COM port** (Windows) หรือ `/dev/ttyUSB0` (Linux/Mac)
+2. **Tools → Port → เลือก COM port** ของ ESP32 (ดูใน Device Manager ถ้าไม่แน่ใจ)
+3. เปิดไฟล์ `esp32/esp32.ino`
+4. กด **Upload (→)**
 
-> ถ้าไม่เห็น port ให้ตรวจสอบสาย USB และ driver ของ CP210x หรือ CH340
+> ถ้าขึ้น `Connecting...` ค้าง ให้กดปุ่ม **BOOT** บนบอร์ดค้างไว้จนกว่าจะ upload ได้
 
-### ขั้นตอนที่ 3 — เปิดและอัปโหลด
+### ตรวจสอบ Firmware
 
-1. เปิดไฟล์ `esp32/esp32.ino` ใน Arduino IDE
-2. กด **Verify (✓)** เพื่อตรวจสอบโค้ดก่อน
-3. กด **Upload (→)** เพื่ออัปโหลด
-
-ถ้า Upload ล้มเหลวให้กดปุ่ม **BOOT** บนบอร์ดค้างไว้ระหว่างที่ขึ้น `Connecting...`
-
-### ขั้นตอนที่ 4 — ตรวจสอบ Firmware
-
-เปิด **Serial Monitor** (Tools → Serial Monitor) ตั้ง baud rate เป็น **115200** ควรเห็น:
+เปิด **Serial Monitor** (baud rate **115200**) ควรเห็น:
 
 ```
 ESP32 Monitoring Device
 ```
 
-ถ้าเห็น output นี้แสดงว่า firmware พร้อมแล้ว
+เมื่อ firmware พร้อมแล้ว **disconnect ESP32 ออกจาก Windows** แล้ว **connect เข้า VM** (ขั้นตอนที่ 2)
 
 ---
 
-## 4. ทดสอบระบบ
+## 7. ทดสอบระบบ
 
-### เสียบ ESP32 และดู log
+### Monitor log แบบ real-time
 
 ```bash
-# เปิด terminal และ monitor log แบบ real-time
-dmesg -w | grep ESP32_MONITOR
+sudo dmesg -w | grep ESP32_MONITOR
 ```
 
-เมื่อเสียบสาย USB ควรเห็น:
+เมื่อเสียบ ESP32 และ connect เข้า VM ควรเห็น:
 
 ```
 ESP32_MONITOR: Scanning /dev/ttyUSB0...
-ESP32_MONITOR: Handshake OK on /dev/ttyUSB0
-ESP32_MONITOR: ESP32 connected on /dev/ttyUSB0
+ESP32_MONITOR: Scanning /dev/ttyCH343USB0...
+ESP32_MONITOR: Handshake OK on /dev/ttyCH343USB0
+ESP32_MONITOR: ESP32 connected on /dev/ttyCH343USB0
 ```
 
 ### ตรวจสอบ sysfs
 
 ```bash
-# ดูค่า CPU Load
 cat /sys/class/misc/esp32_monitor/cpu_load
+# output: 42
 
-# ดูสถานะและพอร์ตที่เชื่อมต่อ
 cat /sys/class/misc/esp32_monitor/esp32_status
-# output: connected /dev/ttyUSB0
+# output: connected /dev/ttyCH343USB0
 ```
 
-### ทดสอบอ่านค่าจาก device
+### อ่านค่าจาก device node
 
 ```bash
 cat /dev/esp32_monitor
@@ -214,89 +310,89 @@ cat /dev/esp32_monitor
 
 ```bash
 udevadm monitor --environment
-# ดู event ที่ driver ส่งออกมาเมื่อ ESP32 เสียบ/ถอด
 ```
 
-### ทดสอบ Reconnect
+### ทดสอบ Auto-reconnect
 
-ถอดสาย USB แล้วเสียบใหม่ — ดู log ควรเห็น driver scan และ reconnect ใหม่อัตโนมัติ
+ถอดสาย USB แล้วเสียบใหม่ (และ Connect เข้า VM อีกครั้ง) — driver จะ scan และ reconnect อัตโนมัติ ไม่ต้อง rmmod/insmod ใหม่
 
 ---
 
-## 5. โหลด Module อัตโนมัติตอน Boot
+## 8. โหลด Module อัตโนมัติตอน Boot
 
 ```bash
-# copy module เข้า kernel modules directory
 sudo cp esp32_monitor.ko /lib/modules/$(uname -r)/extra/
-
-# อัปเดต module dependency
 sudo depmod -a
-
-# เพิ่มให้โหลดอัตโนมัติ
 echo "esp32_monitor" | sudo tee -a /etc/modules
 
-# ทดสอบโหลดผ่าน modprobe
+# ทดสอบ
 sudo modprobe esp32_monitor
+dmesg | grep ESP32_MONITOR
 ```
 
 ---
 
-## 6. ถอนการติดตั้ง
-
-### ถอด Module ชั่วคราว
+## 9. ถอนการติดตั้ง
 
 ```bash
+# ถอด module
 sudo rmmod esp32_monitor
-dmesg | grep ESP32_MONITOR
-# ควรเห็น: ESP32_MONITOR: Unloaded
-```
 
-### ลบออกจาก Boot (ถ้าตั้งค่าไว้)
-
-```bash
-sudo nano /etc/modules
-# ลบบรรทัด esp32_monitor ออก
-
-sudo rm /lib/modules/$(uname -r)/extra/esp32_monitor.ko
+# ลบออกจาก auto-load
+sudo nano /etc/modules  # ลบบรรทัด esp32_monitor
+sudo rm -f /lib/modules/$(uname -r)/extra/esp32_monitor.ko
 sudo depmod -a
-```
 
-### ล้างไฟล์ที่ build
-
-```bash
-cd esp32_monitor/
+# ล้างไฟล์ build
 make clean
 ```
 
 ---
 
-## Troubleshooting
+## 10. Troubleshooting
 
-**`make` ล้มเหลว: No rule to make target**
+**`lsusb` ไม่เห็น ESP32 เลย**
 
-ตรวจสอบว่า `linux-headers` ของ kernel ที่รันอยู่ติดตั้งแล้ว:
+VM ยังไม่ได้รับ USB passthrough → ทำขั้นตอนที่ 2 ก่อน
+
+**มี device ใน `lsusb` แต่ไม่มี `/dev/tty*` โผล่**
+
 ```bash
-apt list --installed | grep linux-headers
+lsusb                          # ดู USB ID
+sudo modprobe ch343            # ถ้า 1a86:55d4
+sudo modprobe ch341            # ถ้า 1a86:7523
+sudo modprobe cp210x           # ถ้า 10c4:ea60
+ls /dev/tty* | grep -E "USB|ACM|CH343"
+```
+
+**Driver scan วนซ้ำไม่หยุด ไม่เจอ ESP32**
+
+```bash
+# 1. ESP32 connect เข้า VM แล้วหรือยัง?
+lsusb
+
+# 2. device node ชื่ออะไร?
+ls /dev/tty* | grep -E "USB|ACM|CH343"
+
+# 3. firmware ส่ง handshake ออกมาไหม?
+#    เปิด Arduino Serial Monitor → ควรเห็น "ESP32 Monitoring Device"
+
+# 4. permission
+sudo usermod -aG dialout $USER   # logout/login ใหม่หลังรัน
 ```
 
 **`insmod` ล้มเหลว: Invalid module format**
 
-kernel version ของ module ไม่ตรงกับที่รันอยู่:
 ```bash
 uname -r
 modinfo esp32_monitor.ko | grep vermagic
-# ต้องตรงกัน
+# ต้องตรงกัน — ถ้าไม่ตรงต้อง build ใหม่ให้ตรงกับ kernel ที่รันอยู่
 ```
 
-**ไม่เห็น `/dev/ttyUSB0` หลังเสียบ ESP32**
+**OOM ระหว่าง compile kernel**
 
-ตรวจสอบ driver USB-to-Serial:
 ```bash
-lsusb
-dmesg | tail -20
-sudo usermod -aG dialout $USER  # แล้ว logout/login ใหม่
+sudo fallocate -l 4G /swapfile
+sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+make -j1 bindeb-pkg LOCALVERSION=-brc-monitoring
 ```
-
-**ESP32 ไม่ตอบสนอง Handshake**
-
-เปิด Serial Monitor ใน Arduino IDE ตรวจสอบว่า ESP32 ส่ง `ESP32 Monitoring Device` ออกมา และตั้ง baud rate ตรงเป็น **115200**

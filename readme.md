@@ -1,8 +1,10 @@
-# ESP32 CPU Load Monitor
+# ESP32 CPU Load Monitor — Linux Kernel Driver
+
+> **Author:** Rapeephat Wannasamran  
 > **Version:** 3.0.0  
 > **License:** GPL  
 
-ระบบ Kernel Driver สำหรับ Linux ที่ดึงค่า CPU Load จาก Kernel Space และส่งไปยังบอร์ด ESP32 ผ่าน Serial USB แบบอัตโนมัติ รองรับ **Plug and Play เต็มรูปแบบ** — ไม่ต้องตั้งค่า udev rules เอง และ detect พอร์ต ESP32 ได้เองด้วย Handshake Protocol
+ระบบ **Linux Kernel Driver** ที่ดึงค่า CPU Load Average จาก Kernel Space และส่งข้อมูลไปยังบอร์ด **ESP32** ผ่าน Serial USB แบบอัตโนมัติ รองรับ Plug and Play เต็มรูปแบบ — ไม่ต้องตั้งค่า udev rules เอง ไม่ต้องระบุพอร์ตตายตัว และ reconnect อัตโนมัติเมื่อถอด-เสียบสาย
 
 ---
 
@@ -10,19 +12,22 @@
 
 ```
 [ Linux Kernel ]
-      │  avenrun[] — Load Average
+      │  avenrun[] — Load Average (normalized by CPU count)
       ▼
-[ esp32_monitor.ko ]  ← Kernel Module
-      │  Auto-scan ttyUSB0..7
+[ esp32_monitor.ko ]  ← Kernel Module (misc device + kthread)
+      │
+      │  Auto-scan: ttyUSB / ttyCH343USB / ttyACM (0..7)
       │  Handshake: "ESP32 Monitoring Device"
-      ▼
-[ /dev/ttyUSB0 ]  ── Serial USB 115200 baud
       │
       ▼
-[ ESP32 DevKit ]
+[ /dev/ttyCH343USB0 ]  ── Serial USB @ 115200 baud
+      │
+      ▼
+[ ESP32 DevKit V1 ]  ← FreeRTOS (SerialTask + LEDTask)
+      │
       │  map(cpuLoad, 1, 99, 1000ms, 50ms)
       ▼
-[ LED กะพริบตามโหลด CPU ]
+[ LED Pin 2 — กะพริบตามโหลด CPU ]
 ```
 
 ---
@@ -30,10 +35,12 @@
 ## โครงสร้างโปรเจค
 
 ```
-esp32_monitor/
-├── esp32_monitor.c       # Linux Kernel Driver
+kernel-linux-monitoring-system/
+├── esp32_monitor.c       # Linux Kernel Driver (C)
+├── Makefile              # Build script สำหรับ out-of-tree module
 ├── esp32/
-│   └── esp32.ino         # Arduino firmware สำหรับ ESP32
+│   └── esp32.ino         # ESP32 Firmware (Arduino + FreeRTOS)
+├── how_to_compile.md     # คู่มือคอมไพล์แบบละเอียด
 └── README.md
 ```
 
@@ -41,34 +48,74 @@ esp32_monitor/
 
 ## จุดเด่น
 
-- **Zero-config PnP** — ไม่ต้องสร้าง `/etc/udev/rules.d/` เอง udev อ่าน sysfs ได้โดยตรง
-- **Auto-detect port** — scan `ttyUSB0`–`ttyUSB7` และยืนยันตัวตนด้วย Handshake Protocol
-- **Auto-reconnect** — ถอดแล้วเสียบ USB ใหม่ → driver detect และเชื่อมต่อใหม่อัตโนมัติ
-- **Dual interface** — อ่านค่าได้ทั้งจาก `/dev/esp32_monitor` และ sysfs attributes
+- **Zero-config PnP** — ไม่ต้องสร้าง `/etc/udev/rules.d/` เอง sysfs attributes พร้อมให้ udev อ่านได้ทันที
+- **Auto-detect port** — scan `ttyUSB`, `ttyCH343USB`, และ `ttyACM` ครอบคลุม USB-Serial chip ทุกรุ่น
+- **Handshake-based identification** — ยืนยันตัวตน ESP32 ด้วย challenge/response ก่อนส่งข้อมูล ป้องกันส่งข้อมูลไปยัง device ผิดตัว
+- **Auto-reconnect** — ถอดแล้วเสียบ USB ใหม่ → kthread detect และเชื่อมต่อใหม่อัตโนมัติ
+- **FreeRTOS firmware** — ESP32 ใช้ `SerialTask` และ `LEDTask` แยกกัน ป้องกัน heap fragmentation และ watchdog reset
+- **Dual read interface** — อ่านค่า CPU load ได้ทั้งจาก `/dev/esp32_monitor` และ sysfs
+
+---
+
+## USB-Serial Chip ที่รองรับ
+
+| USB ID | Chip | Kernel Module | Device Node |
+|--------|------|--------------|-------------|
+| `1a86:7523` | CH340 / CH341 | `ch341` (built-in) | `/dev/ttyUSB0` |
+| `1a86:55d4` | **CH343 / CH9102** | **`ch343` (ต้องติดตั้งเพิ่ม)** | **`/dev/ttyCH343USB0`** |
+| `10c4:ea60` | CP2102 | `cp210x` (built-in) | `/dev/ttyUSB0` |
+| `2341:0043` | CDC ACM | `cdc_acm` (built-in) | `/dev/ttyACM0` |
+
+> ⚠️ **ESP32 DevKit V1 บางล็อต** ใช้ chip **CH343** (USB ID `1a86:55d4`) ซึ่ง `ch341` module ไม่รองรับ device node จะเป็น `/dev/ttyCH343USB0` แทน `/dev/ttyUSB0` ดูวิธีติดตั้งได้ใน `how_to_compile.md`
 
 ---
 
 ## Handshake Protocol
 
-ระบบไม่กำหนดพอร์ตตายตัว แต่ใช้การ "ถามตอบ" เพื่อยืนยันว่าอุปกรณ์ที่เสียบคือ ESP32 จริง
+```
+Linux Driver (kthread)                ESP32 (SerialTask)
+        │                                    │
+        │ ── "ACK\n" ───────────────────────► │
+        │                                    │  strcmp(buffer, "ACK") == 0
+        │ ◄─────── "ESP32 Monitoring Device\n" ──
+        │                                    │
+        │  strstr(rxbuf, HANDSHAKE_MSG) ✅   │
+        │                                    │
+        │ ── "42\n" (CPU load %) ───────────► │  atoi(buffer) → cpuLoad
+        │ ── "38\n" ────────────────────────► │  blinkInterval = map(...)
+        │       (ทุก 1000ms)                  │
+```
 
-```
-Linux Driver                      ESP32
-     │                              │
-     │ ── "ACK\n" ────────────────► │
-     │                              │ (รับ ACK → ตอบกลับ)
-     │ ◄──── "ESP32 Monitoring Device\n" ──
-     │                              │
-     │  ✅ Handshake สำเร็จ         │
-     │ ── "CPU:42\n" ─────────────► │
-     │ ── "CPU:38\n" ─────────────► │  (ทุก 1 วินาที)
-```
+---
+
+## ESP32 Firmware Architecture
+
+firmware ใช้ **FreeRTOS** แบ่งการทำงานออกเป็น 2 tasks:
+
+| Task | Stack | Priority | หน้าที่ |
+|------|-------|----------|--------|
+| `SerialTask` | 2048 bytes | 1 | รับข้อมูลจาก Serial, parse CPU load, ตอบ handshake |
+| `LEDTask` | 1024 bytes | 1 | ควบคุม LED ตาม `cpuLoad` + `blinkInterval` |
+
+การใช้ `char buffer[32]` แทน `String` ป้องกัน heap fragmentation บน ESP32 และ `vTaskDelay()` แทน `delay()` ป้องกัน Watchdog Timer reset
+
+---
+
+## พฤติกรรม LED
+
+| CPU Load | พฤติกรรม | blinkInterval |
+|----------|----------|--------------|
+| 0% | ดับ (LOW) | — |
+| 1–99% | กะพริบ ยิ่งโหลดสูงยิ่งเร็ว | 1000ms → 50ms |
+| 100% | ติดค้าง (HIGH) | — |
 
 ---
 
 ## API Reference
 
 ### `/dev/esp32_monitor`
+
+อ่านค่า CPU load ปัจจุบัน (0–100%):
 
 ```bash
 cat /dev/esp32_monitor
@@ -78,33 +125,27 @@ cat /dev/esp32_monitor
 ### sysfs Attributes
 
 ```bash
-# CPU Load (normalize ตามจำนวน core แล้ว)
+# CPU Load (normalize ด้วย num_online_cpus() แล้ว)
 cat /sys/class/misc/esp32_monitor/cpu_load
 
-# สถานะการเชื่อมต่อ + พอร์ตที่ใช้งาน
+# สถานะ ESP32 + พอร์ตที่กำลังใช้งาน
 cat /sys/class/misc/esp32_monitor/esp32_status
-# connected /dev/ttyUSB0
+# connected /dev/ttyCH343USB0
 # disconnected none
 ```
 
 ### UEVENT Environment Variables
 
-| Event | Variable | ค่า |
-|-------|----------|-----|
-| เสียบ ESP32 | `ESP32_STATUS` | `connected` |
-| เสียบ ESP32 | `ESP32_PORT` | เช่น `/dev/ttyUSB0` |
-| ถอด ESP32 | `ESP32_STATUS` | `disconnected` |
+| Trigger | `ESP32_STATUS` | `ESP32_PORT` |
+|---------|---------------|-------------|
+| Handshake สำเร็จ | `connected` | เช่น `/dev/ttyCH343USB0` |
+| ถอด / write error | `disconnected` | — |
+
+```bash
+# Monitor uevent แบบ real-time
+udevadm monitor --environment
+```
 
 ---
 
-## พฤติกรรม LED บน ESP32
-
-| CPU Load | พฤติกรรม LED |
-|----------|--------------|
-| 0% | ดับ |
-| 1–99% | กะพริบ (ยิ่งโหลดสูง ยิ่งกะพริบเร็ว) |
-| 100% | ติดค้าง |
-
----
-
-*โปรเจคนี้เป็นส่วนหนึ่งของ Final Project วิชา CS422 — Linux Kernel Module & Embedded System Integration*
+*Final Project — CS422 Operating System*
