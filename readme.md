@@ -1,6 +1,5 @@
 # ESP32 CPU Load Monitor — Linux Kernel Driver
 
-> **Author:** Rapeephat Wannasamran  
 > **Version:** 3.0.0  
 > **License:** GPL  
 
