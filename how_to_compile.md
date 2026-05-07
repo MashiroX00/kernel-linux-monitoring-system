@@ -181,21 +181,33 @@ wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.17.13.tar.xz
 tar -xf linux-6.17.13.tar.xz
 cd linux-6.17.13
 
-# copy driver เข้า kernel tree
+# 1. เพิ่ม ESP32 Monitor Driver
 cp /path/to/kernel-linux-monitoring-system/esp32_monitor.c drivers/char/
 
-# เพิ่มใน drivers/char/Kconfig (ก่อน endmenu)
 cat >> drivers/char/Kconfig << 'EOF'
-
 config ESP32_MONITOR
-	tristate "ESP32 CPU Load Monitor Support"
-	default m
+	bool "ESP32 CPU Load Monitor Support"
+	default y
 	help
 	  Sends CPU load to ESP32 via Serial USB using handshake auto-detection.
 EOF
 
-# เพิ่มใน drivers/char/Makefile
 echo 'obj-$(CONFIG_ESP32_MONITOR) += esp32_monitor.o' >> drivers/char/Makefile
+
+# 2. เพิ่ม Calculator Driver (procfs)
+cp /path/to/kernel-linux-monitoring-system/calculator.c drivers/misc/
+
+cat >> drivers/misc/Kconfig << 'EOF'
+config CALCULATOR
+       bool "Calculator via /proc/calculator"
+       depends on PROC_FS
+       default y
+       help
+         Adds a simple /proc/calculator interface.
+         Write "a op b" to compute, read back the result.
+EOF
+
+echo 'obj-$(CONFIG_CALCULATOR) += calculator.o' >> drivers/misc/Makefile
 
 # ตั้งค่า kernel
 cp /boot/config-$(uname -r) .config
@@ -204,6 +216,7 @@ scripts/config --disable SYSTEM_REVOCATION_KEYS
 scripts/config --disable DEBUG_INFO
 scripts/config --disable CONFIG_DEBUG_INFO_BTF
 scripts/config --module CONFIG_ESP32_MONITOR
+scripts/config --enable CONFIG_CALCULATOR
 make olddefconfig
 
 # Compile (สร้างเป็น .deb)
@@ -274,60 +287,41 @@ ESP32 Monitoring Device
 
 ## 7. ทดสอบระบบ
 
-### Monitor log แบบ real-time
+### 7.1 ESP32 CPU Monitor
 
 ```bash
+# ดู log แบบ real-time
 sudo dmesg -w | grep ESP32_MONITOR
-```
 
-เมื่อเสียบ ESP32 และ connect เข้า VM ควรเห็น:
-
-```
-ESP32_MONITOR: Scanning /dev/ttyUSB0...
-ESP32_MONITOR: Scanning /dev/ttyCH343USB0...
-ESP32_MONITOR: Handshake OK on /dev/ttyCH343USB0
-ESP32_MONITOR: ESP32 connected on /dev/ttyCH343USB0
-```
-
-### ตรวจสอบ sysfs
-
-```bash
+# ตรวจสอบ sysfs
 cat /sys/class/misc/esp32_monitor/cpu_load
-# output: 42
-
 cat /sys/class/misc/esp32_monitor/esp32_status
-# output: connected /dev/ttyCH343USB0
 ```
 
-### อ่านค่าจาก device node
+### 7.2 Calculator Driver (procfs)
 
 ```bash
-cat /dev/esp32_monitor
-# output: 42
+# บวกเลข (ต้องมีช่องว่างระหว่างตัวเลขและเครื่องหมาย)
+echo "10 + 5" > /proc/calculator
+cat /proc/calculator
+# ผลลัพธ์: 15
+
+# คูณเลข
+echo "9 * 8" > /proc/calculator
+cat /proc/calculator
+# ผลลัพธ์: 72
+
+# รองรับเครื่องหมาย: + - * / %
 ```
-
-### Monitor UEVENT
-
-```bash
-udevadm monitor --environment
-```
-
-### ทดสอบ Auto-reconnect
-
-ถอดสาย USB แล้วเสียบใหม่ (และ Connect เข้า VM อีกครั้ง) — driver จะ scan และ reconnect อัตโนมัติ ไม่ต้อง rmmod/insmod ใหม่
 
 ---
 
-## 8. โหลด Module อัตโนมัติตอน Boot
+## 8. โหลด Module อัตโนมัติตอน Boot (กรณีใช้ Option A)
 
 ```bash
 sudo cp esp32_monitor.ko /lib/modules/$(uname -r)/extra/
 sudo depmod -a
 echo "esp32_monitor" | sudo tee -a /etc/modules
-
-# ทดสอบ
-sudo modprobe esp32_monitor
-dmesg | grep ESP32_MONITOR
 ```
 
 ---
@@ -335,13 +329,8 @@ dmesg | grep ESP32_MONITOR
 ## 9. ถอนการติดตั้ง
 
 ```bash
-# ถอด module
+# ถอด module (Option A)
 sudo rmmod esp32_monitor
-
-# ลบออกจาก auto-load
-sudo nano /etc/modules  # ลบบรรทัด esp32_monitor
-sudo rm -f /lib/modules/$(uname -r)/extra/esp32_monitor.ko
-sudo depmod -a
 
 # ล้างไฟล์ build
 make clean

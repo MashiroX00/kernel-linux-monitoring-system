@@ -37,10 +37,12 @@
 ```
 kernel-linux-monitoring-system/
 ├── esp32_monitor.c       # Linux Kernel Driver (C)
-├── Makefile              # Build script สำหรับ out-of-tree module
+├── calculator.c          # Calculator Kernel Driver (procfs)
+├── Makefile              # Build scriptสำหรับ out-of-tree module
 ├── esp32/
 │   └── esp32.ino         # ESP32 Firmware (Arduino + FreeRTOS)
 ├── how_to_compile.md     # คู่มือคอมไพล์แบบละเอียด
+├── how_to_run.md         # คู่มือการรัน Calculator Driver
 └── README.md
 ```
 
@@ -54,6 +56,20 @@ kernel-linux-monitoring-system/
 - **Auto-reconnect** — ถอดแล้วเสียบ USB ใหม่ → kthread detect และเชื่อมต่อใหม่อัตโนมัติ
 - **FreeRTOS firmware** — ESP32 ใช้ `SerialTask` และ `LEDTask` แยกกัน ป้องกัน heap fragmentation และ watchdog reset
 - **Dual read interface** — อ่านค่า CPU load ได้ทั้งจาก `/dev/esp32_monitor` และ sysfs
+
+---
+
+## เครื่องคิดเลขผ่าน procfs (Calculator Driver)
+
+เพิ่มความสามารถให้ Kernel รองรับการคำนวณพื้นฐานผ่าน `/proc/calculator` โดยรองรับเครื่องหมาย `+`, `-`, `*`, `/`, และ `%`
+
+### การใช้งานเบื้องต้น
+```bash
+echo "10 + 5" > /proc/calculator
+cat /proc/calculator
+# ผลลัพธ์: 15
+```
+ดูรายละเอียดการติดตั้งใน `how_to_compile.md` (ข้อ 11)
 
 ---
 

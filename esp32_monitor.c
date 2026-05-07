@@ -9,6 +9,7 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/cpu.h>
+#include <linux/umh.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Rapeephat Wannasamran");
@@ -53,7 +54,10 @@ static struct file *try_handshake(const char *port)
     loff_t pos = 0;
     ssize_t n;
     int timeout = HANDSHAKE_TIMEOUT / 100;
-
+    char *argv[] = { "/bin/stty", "-F", (char *)port, "115200", "-hupcl", NULL };
+    char *envp[] = { "HOME=/", "PATH=/sbin:/bin:/usr/sbin:/usr/bin", NULL };
+    call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+    
     tty = filp_open(port, O_RDWR | O_NOCTTY | O_NONBLOCK, 0);
     if (IS_ERR(tty))
         return NULL;
