@@ -2,7 +2,7 @@
 
 > **Version:** 4.0.0  
 > **License:** GPL  
-> **Author:** Rapeephat Wannasamran and BRC Group
+> **Author:** Rapeephat Wannasamran and BRC Group  
 > **Course:** CS422 Operating System
 
 ระบบ **Linux Kernel Driver** ที่ดึงค่า CPU Load Average จาก Kernel Space และส่งข้อมูลไปยังบอร์ด **ESP32** ผ่าน Serial USB แบบอัตโนมัติ รองรับ Plug and Play เต็มรูปแบบ — ตรวจจับ USB device ผ่าน kernel event โดยตรง ไม่ต้องสแกน port เอง และ reconnect อัตโนมัติเมื่อถอด-เสียบสาย
