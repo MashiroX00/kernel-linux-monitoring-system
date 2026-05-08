@@ -3,9 +3,9 @@
 // ==============================
 // Pin Configuration (กำหนดเองได้)
 // ==============================
-const int ledPin  = ;   // LED 1 (ไม่ได้ใช้ใน logic นี้)
-const int led2Pin = ;   // LED 2
-const int led3Pin = ;   // LED 3
+const int ledPin  = 27;   // LED 1 (ไม่ได้ใช้ใน logic นี้)
+const int led2Pin = 33;   // LED 2
+const int led3Pin = 32;   // LED 3
 
 // ==============================
 // Shared State (volatile สำหรับ Multi-task)
@@ -100,7 +100,13 @@ void taskLED(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(100));
     continue; // ข้ามรอบนี้
     }
-    
+    if (isConnected) {
+      digitalWrite(ledPin,HIGH);
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }else {
+      digitalWrite(ledPin,LOW);
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
     int load = cpuLoad; // อ่านครั้งเดียวต่อรอบ ป้องกัน race condition
 
     if (load == 0) {
