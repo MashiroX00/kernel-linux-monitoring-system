@@ -62,13 +62,14 @@ void taskSerial(void *pvParameters) {
           if (strcmp(buffer, "ACK") == 0) {
             Serial.println("ESP32 Monitoring Device");
             isConnected = true;
+            lastReceived  = millis();
           } else {
             int val = atoi(buffer);
             if (val < 0)   val = 0;
             if (val > 100) val = 100;
             cpuLoad = val;
             lastReceived = millis();
-            isConnected = true;
+            isConnected  = true;
             // คำนวณ interval เฉพาะตอนค่าเปลี่ยน
             if (cpuLoad > 0 && cpuLoad < 100) {
               blinkInterval = map(cpuLoad, 1, 99, 1000, 50);
@@ -93,50 +94,46 @@ void taskLED(void *pvParameters) {
   bool led3State = false;
 
   while (true) {
-    if (!isConnected || (millis() - lastReceived > TIMEOUT_MS)) {
-    isConnected = false;
-    digitalWrite(led2Pin, LOW);
-    digitalWrite(led3Pin, LOW);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    continue; // ข้ามรอบนี้
-    }
-    if (isConnected) {
-      digitalWrite(ledPin,HIGH);
+    // เช็ค timeout
+    bool connected = isConnected && (millis() - lastReceived <= TIMEOUT_MS);
+    if (!connected) {
+      isConnected = false;
+      digitalWrite(ledPin,  LOW);
+      digitalWrite(led2Pin, LOW);
+      digitalWrite(led3Pin, LOW);
+      led2State = false;
+      led3State = false;
       vTaskDelay(pdMS_TO_TICKS(100));
-    }else {
-      digitalWrite(ledPin,LOW);
-      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
     }
-    int load = cpuLoad; // อ่านครั้งเดียวต่อรอบ ป้องกัน race condition
+
+    // LED1 แสดงสถานะ connected
+    digitalWrite(ledPin, HIGH);
+
+    int load = cpuLoad;
 
     if (load == 0) {
-      // ดับทั้งคู่
       digitalWrite(led2Pin, LOW);
       digitalWrite(led3Pin, LOW);
       led2State = false;
       led3State = false;
       vTaskDelay(pdMS_TO_TICKS(100));
 
-    } else if (load >= 1 && load <= 49) {
-      // LED2 กระพริบ, LED3 ดับ
+    } else if (load <= 49) {
       digitalWrite(led3Pin, LOW);
       led3State = false;
-
       led2State = !led2State;
       digitalWrite(led2Pin, led2State);
       vTaskDelay(pdMS_TO_TICKS(blinkInterval));
 
-    } else if (load >= 50 && load <= 99) {
-      // LED2 ติดค้าง, LED3 กระพริบ
+    } else if (load <= 99) {
       digitalWrite(led2Pin, HIGH);
       led2State = true;
-
       led3State = !led3State;
       digitalWrite(led3Pin, led3State);
       vTaskDelay(pdMS_TO_TICKS(blinkInterval));
 
-    } else if (load >= 100) {
-      // ติดค้างทั้งคู่
+    } else {
       digitalWrite(led2Pin, HIGH);
       digitalWrite(led3Pin, HIGH);
       led2State = true;

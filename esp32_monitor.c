@@ -11,35 +11,29 @@
 #include <linux/cpu.h>
 #include <linux/usb.h>
 #include <linux/mutex.h>
+#include <linux/notifier.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Rapeephat Wannasamran");
-MODULE_DESCRIPTION("ESP32 CPU Monitor - USB Event-Driven Detection");
-MODULE_VERSION("4.1.0");
+MODULE_DESCRIPTION("ESP32 CPU Monitor - notifier based, no USB bind conflict");
+MODULE_VERSION("4.4.0");
 
-/* ==================== CONFIG ==================== */
 #define SEND_INTERVAL_MS    1000
 #define HANDSHAKE_MSG       "ESP32 Monitoring Device"
 #define HANDSHAKE_ACK       "ACK\n"
 #define OUTPUT_BUF_SIZE     64
-#define HANDSHAKE_TIMEOUT   3000 /* 3 วินาที */
-#define UDEV_WAIT_TIMEOUT   10000 /* รอ udev สร้าง node สูงสุด 10 วินาที */
+#define HANDSHAKE_TIMEOUT   3000
+#define UDEV_WAIT_MS        8000   /* รอ cdc_acm สร้าง node สูงสุด 8 วินาที */
 
-/* ==================== USB ID TABLE ==================== */
-static const struct usb_device_id esp32_usb_ids[] = {
-    { USB_DEVICE(0x1a86, 0x7523) }, /* CH340  */
-    { USB_DEVICE(0x10c4, 0xea60) }, /* CP2102 */
-    { USB_DEVICE(0x1a86, 0x55d4) }, /* CH9102 / CH343 */
-    { USB_DEVICE(0x303a, 0x1001) }, /* ESP32-S3 native USB */
-    { }
-};
-MODULE_DEVICE_TABLE(usb, esp32_usb_ids);
+#define ESP32_VID  0x1a86
+#define ESP32_PID  0x55d4
 
 /* ==================== STATE ==================== */
-static struct task_struct  *monitor_thread = NULL;
 static struct miscdevice    cpu_dev;
+static struct task_struct  *monitor_thread = NULL;
 static char   active_port[32] = "";
 static bool   esp32_connected  = false;
+static bool   esp32_present    = false;   /* USB เสียบอยู่ไหม */
 static DEFINE_MUTEX(esp32_lock);
 
 /* ==================== HELPER ==================== */
@@ -49,115 +43,94 @@ static unsigned long get_cpu_load_percent(void)
     return min(load, 100UL);
 }
 
-/* ==================== KTHREAD MAIN LOOP ==================== */
+/* ==================== KTHREAD ==================== */
 static int esp32_monitor_kthread(void *data)
 {
     struct file *tty = NULL;
     char port[32] = {0};
     int i, p, retry;
     bool found = false;
-    bool handshake_ok = false;
 
-    /* รูปแบบชื่อ TTY ที่เป็นไปได้ทั้งหมด รวมถึง CH343 */
     static const char *patterns[] = {
         "/dev/ttyACM%d",
         "/dev/ttyUSB%d",
         "/dev/ttyCH343USB%d",
-        "/dev/ttyUSBCH343%d" /* เผื่อกรณีชื่อสลับ */
     };
 
-    /* ---------------------------------------------------------
-     * PHASE 1: SCAN & WAIT FOR UDEV
-     * วนหา node สูงสุด 20 รอบ (รอบละ 500ms = 10 วินาที)
-     * ---------------------------------------------------------*/
-    pr_info("ESP32_MONITOR: Waiting for udev to create TTY node...\n");
-    for (retry = 0; retry < (UDEV_WAIT_TIMEOUT / 500) && !kthread_should_stop(); retry++) {
+    pr_info("ESP32_MONITOR: Thread started, waiting for tty node...\n");
+
+    /* รอให้ cdc_acm หรือ driver อื่นสร้าง node ก่อน */
+    for (retry = 0; retry < (UDEV_WAIT_MS / 200) && !kthread_should_stop(); retry++) {
         for (p = 0; p < ARRAY_SIZE(patterns) && !found; p++) {
-            for (i = 0; i < 4 && !found; i++) {
+            for (i = 0; i < 8 && !found; i++) {
+                struct file *f;
                 snprintf(port, sizeof(port), patterns[p], i);
-                tty = filp_open(port, O_RDWR | O_NOCTTY | O_NONBLOCK, 0);
-                if (!IS_ERR(tty)) {
-                    filp_close(tty, NULL);
-                    tty = NULL;
+                f = filp_open(port, O_RDWR | O_NOCTTY | O_NONBLOCK, 0);
+                if (!IS_ERR(f)) {
+                    filp_close(f, NULL);
                     found = true;
-                    break;
                 }
             }
         }
         if (found) break;
-        msleep_interruptible(500); 
+        msleep_interruptible(200);
     }
 
     if (!found || kthread_should_stop()) {
-        pr_warn("ESP32_MONITOR: Failed to find TTY node (Timeout)\n");
-        return 0; /* จบการทำงานของ Thread */
+        pr_warn("ESP32_MONITOR: No tty node found after %dms\n", UDEV_WAIT_MS);
+        goto out;
     }
 
-    pr_info("ESP32_MONITOR: Node found at %s. Configuring stty...\n", port);
+    pr_info("ESP32_MONITOR: Found tty node: %s\n", port);
 
-    /* หน่วงเวลาให้สิทธิ์ไฟล์ถูกตั้งค่าโดย udev อย่างสมบูรณ์ */
-    msleep(500);
-
-    /* ---------------------------------------------------------
-     * PHASE 2: STTY SETUP
-     * ---------------------------------------------------------*/
+    /* ตั้งค่า baud rate */
     {
         char *argv[] = { "/bin/stty", "-F", port, "115200", "-hupcl", NULL };
         char *envp[] = { "HOME=/", "PATH=/sbin:/bin:/usr/sbin:/usr/bin", NULL };
         call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+        msleep(300);
     }
-    msleep(200); /* รอ stty คืนค่า */
 
     tty = filp_open(port, O_RDWR | O_NOCTTY | O_NONBLOCK, 0);
     if (IS_ERR(tty)) {
-        pr_err("ESP32_MONITOR: Cannot open %s after stty setup\n", port);
-        return 0;
+        pr_err("ESP32_MONITOR: Cannot open %s after stty\n", port);
+        goto out;
     }
 
-    /* ---------------------------------------------------------
-     * PHASE 3: HANDSHAKE
-     * ---------------------------------------------------------*/
+    /* Handshake */
     {
         char rxbuf[128] = {0};
         loff_t pos = 0;
         ssize_t n;
         int total = 0;
-        int timeout_ticks = HANDSHAKE_TIMEOUT / 100;
+        int ticks = HANDSHAKE_TIMEOUT / 100;
 
-        /* ส่ง ACK ไปก่อน */
         kernel_write(tty, HANDSHAKE_ACK, strlen(HANDSHAKE_ACK), &pos);
-        pr_info("ESP32_MONITOR: Handshake ACK sent to %s. Waiting for reply...\n", port);
 
-        /* รออ่านข้อความยืนยันจาก ESP32 */
-        while (timeout_ticks-- > 0 && !kthread_should_stop()) {
-            n = kernel_read(tty, rxbuf + total, sizeof(rxbuf) - 1 - total, &pos);
+        while (ticks-- > 0 && !kthread_should_stop()) {
+            msleep_interruptible(100);
+            n = kernel_read(tty, rxbuf + total,
+                            sizeof(rxbuf) - 1 - total, &pos);
             if (n > 0) {
                 total += n;
-                rxbuf[total] = '\0'; /* ปิดสตริงกันเหนียว */
                 if (strstr(rxbuf, HANDSHAKE_MSG)) {
-                    handshake_ok = true;
-                    break;
+                    pr_info("ESP32_MONITOR: Handshake OK on %s\n", port);
+                    goto handshake_ok;
                 }
             }
-            msleep_interruptible(100);
         }
-    }
 
-    if (!handshake_ok) {
         pr_warn("ESP32_MONITOR: Handshake failed on %s\n", port);
         filp_close(tty, NULL);
-        return 0;
+        goto out;
     }
 
-    pr_info("ESP32_MONITOR: Handshake Successful on %s!\n", port);
-
-    /* อัปเดตสถานะ Global */
+handshake_ok:
     mutex_lock(&esp32_lock);
     strscpy(active_port, port, sizeof(active_port));
     esp32_connected = true;
     mutex_unlock(&esp32_lock);
 
-    /* ส่ง UEVENT ให้ Userspace รู้ */
     {
         char env_port[48];
         snprintf(env_port, sizeof(env_port), "ESP32_PORT=%s", port);
@@ -165,93 +138,85 @@ static int esp32_monitor_kthread(void *data)
         kobject_uevent_env(&cpu_dev.this_device->kobj, KOBJ_CHANGE, envp);
     }
 
-    /* ---------------------------------------------------------
-     * PHASE 4: MAIN SEND LOOP
-     * ---------------------------------------------------------*/
-    {
+    /* Send loop */
+    while (!kthread_should_stop()) {
         char buf[OUTPUT_BUF_SIZE];
-        loff_t pos;
-        int len;
+        loff_t wpos = 0;
+        int len = snprintf(buf, sizeof(buf), "%lu\n", get_cpu_load_percent());
 
-        while (!kthread_should_stop()) {
-            len = snprintf(buf, sizeof(buf), "%lu\n", get_cpu_load_percent());
-            pos = 0;
-
-            if (kernel_write(tty, buf, len, &pos) < 0) {
-                pr_info("ESP32_MONITOR: Lost connection on %s (Write failed)\n", port);
-                break;
-            }
-            msleep_interruptible(SEND_INTERVAL_MS);
+        if (kernel_write(tty, buf, len, &wpos) < 0) {
+            pr_info("ESP32_MONITOR: Lost connection on %s\n", port);
+            break;
         }
+        msleep_interruptible(SEND_INTERVAL_MS);
     }
 
-    /* ---------------------------------------------------------
-     * CLEANUP เมื่อ Thread จบหรือหลุด
-     * ---------------------------------------------------------*/
     filp_close(tty, NULL);
 
+out:
     mutex_lock(&esp32_lock);
     esp32_connected = false;
     active_port[0]  = '\0';
+    monitor_thread  = NULL;
     mutex_unlock(&esp32_lock);
 
-    char *disc_envp[] = { "ESP32_STATUS=disconnected", NULL };
-    kobject_uevent_env(&cpu_dev.this_device->kobj, KOBJ_CHANGE, disc_envp);
-
-    pr_info("ESP32_MONITOR: Stopped monitoring %s\n", port);
+    {
+        char *envp[] = { "ESP32_STATUS=disconnected", NULL };
+        kobject_uevent_env(&cpu_dev.this_device->kobj, KOBJ_CHANGE, envp);
+    }
     return 0;
 }
 
-/* ==================== USB PROBE / DISCONNECT ==================== */
-static int esp32_usb_probe(struct usb_interface *intf,
-                           const struct usb_device_id *id)
+/* ==================== USB NOTIFIER (ไม่ bind — แค่สังเกต) ==================== */
+static int esp32_usb_notify(struct notifier_block *nb,
+                             unsigned long action, void *data)
 {
-    int ifnum = intf->cur_altsetting->desc.bInterfaceNumber;
-    if (ifnum != 0)
-        return -ENODEV;
+    struct usb_device *udev = data;
 
-    pr_info("ESP32_MONITOR: USB device plugged (VID=%04x PID=%04x)\n",
-            id->idVendor, id->idProduct);
+    if (udev->descriptor.idVendor  != ESP32_VID ||
+        udev->descriptor.idProduct != ESP32_PID)
+        return NOTIFY_DONE;
 
-    mutex_lock(&esp32_lock);
-    /* ถ้ามี Thread เก่าค้างอยู่ ให้หยุดก่อน */
-    if (monitor_thread) {
-        kthread_stop(monitor_thread);
-        monitor_thread = NULL;
+    if (action == USB_DEVICE_ADD) {
+        pr_info("ESP32_MONITOR: ESP32 plugged in (VID=%04x PID=%04x)\n",
+                ESP32_VID, ESP32_PID);
+
+        mutex_lock(&esp32_lock);
+        esp32_present = true;
+
+        /* หยุด thread เก่าถ้ายังค้างอยู่ */
+        if (monitor_thread && !IS_ERR(monitor_thread)) {
+            kthread_stop(monitor_thread);
+            monitor_thread = NULL;
+        }
+
+        monitor_thread = kthread_run(esp32_monitor_kthread,
+                                     NULL, "esp32_mon");
+        mutex_unlock(&esp32_lock);
+
+    } else if (action == USB_DEVICE_REMOVE) {
+        pr_info("ESP32_MONITOR: ESP32 removed\n");
+
+        mutex_lock(&esp32_lock);
+        esp32_present   = false;
+        esp32_connected = false;
+        active_port[0]  = '\0';
+
+        if (monitor_thread && !IS_ERR(monitor_thread)) {
+            kthread_stop(monitor_thread);
+            monitor_thread = NULL;
+        }
+        mutex_unlock(&esp32_lock);
     }
-    
-    /* เริ่ม Kthread ตัวใหม่ */
-    monitor_thread = kthread_run(esp32_monitor_kthread, NULL, "esp32_mon_th");
-    mutex_unlock(&esp32_lock);
 
-    return 0;
+    return NOTIFY_OK;
 }
 
-static void esp32_usb_disconnect(struct usb_interface *intf)
-{
-    pr_info("ESP32_MONITOR: USB device unplugged\n");
-
-    mutex_lock(&esp32_lock);
-    if (monitor_thread) {
-        kthread_stop(monitor_thread); /* จะส่งสัญญาณ kthread_should_stop() ไปให้ thread ปิดตัวเอง */
-        monitor_thread = NULL;
-    }
-    esp32_connected = false;
-    active_port[0]  = '\0';
-    mutex_unlock(&esp32_lock);
-
-    char *envp[] = { "ESP32_STATUS=disconnected", NULL };
-    kobject_uevent_env(&cpu_dev.this_device->kobj, KOBJ_CHANGE, envp);
-}
-
-static struct usb_driver esp32_usb_driver = {
-    .name       = "esp32_monitor",
-    .probe      = esp32_usb_probe,
-    .disconnect = esp32_usb_disconnect,
-    .id_table   = esp32_usb_ids,
+static struct notifier_block esp32_nb = {
+    .notifier_call = esp32_usb_notify,
 };
 
-/* ==================== SYSFS & MISC ==================== */
+/* ==================== SYSFS ==================== */
 static ssize_t cpu_load_show(struct device *dev,
                               struct device_attribute *attr, char *buf)
 {
@@ -262,13 +227,13 @@ DEVICE_ATTR_RO(cpu_load);
 static ssize_t esp32_status_show(struct device *dev,
                                   struct device_attribute *attr, char *buf)
 {
-    bool connected;
+    bool conn;
     char port[32];
     mutex_lock(&esp32_lock);
-    connected = esp32_connected;
+    conn = esp32_connected;
     strscpy(port, active_port[0] ? active_port : "none", sizeof(port));
     mutex_unlock(&esp32_lock);
-    return sysfs_emit(buf, "%s %s\n", connected ? "connected" : "disconnected", port);
+    return sysfs_emit(buf, "%s %s\n", conn ? "connected" : "disconnected", port);
 }
 DEVICE_ATTR_RO(esp32_status);
 
@@ -279,26 +244,7 @@ static struct attribute *esp32_attrs[] = {
 };
 ATTRIBUTE_GROUPS(esp32);
 
-static ssize_t cpu_read(struct file *file, char __user *buf,
-                         size_t count, loff_t *ppos)
-{
-    char output[OUTPUT_BUF_SIZE];
-    int len;
-
-    if (*ppos > 0) return 0;
-
-    len = snprintf(output, sizeof(output), "%lu\n", get_cpu_load_percent());
-    if (copy_to_user(buf, output, len))
-        return -EFAULT;
-
-    *ppos += len;
-    return len;
-}
-
-static const struct file_operations cpu_fops = {
-    .owner = THIS_MODULE,
-    .read  = cpu_read,
-};
+static const struct file_operations cpu_fops = { .owner = THIS_MODULE };
 
 static struct miscdevice cpu_dev = {
     .minor  = MISC_DYNAMIC_MINOR,
@@ -311,38 +257,35 @@ static struct miscdevice cpu_dev = {
 static int __init cpu_monitor_init(void)
 {
     int ret;
-    pr_info("========================================\n");
-    pr_info("ESP32_MONITOR: Kernel Driver Loaded v4.1.0\n");
-    pr_info("========================================\n");
 
     ret = misc_register(&cpu_dev);
     if (ret) return ret;
 
-    ret = usb_register(&esp32_usb_driver);
-    if (ret) {
-        misc_deregister(&cpu_dev);
-        return ret;
-    }
+    usb_register_notify(&esp32_nb);
 
-    kobject_uevent(&cpu_dev.this_device->kobj, KOBJ_ADD);
+    pr_info("========================================\n");
+    pr_info("ESP32_MONITOR: Kernel Driver Loaded\n");
+    pr_info("ESP32_MONITOR: Version 4.3.0\n");
+    pr_info("ESP32_MONITOR: Author - Rapeephat Wannasamran\n");
+    pr_info("ESP32_MONITOR: Waiting for ESP32 USB device...\n");
+    pr_info("========================================\n");
+
     return 0;
 }
 
 static void __exit cpu_monitor_exit(void)
 {
-    /* หากตอนถอด Module ยังเสียบสายอยู่ ต้องสั่งหยุด Thread */
+    usb_unregister_notify(&esp32_nb);
+
     mutex_lock(&esp32_lock);
-    if (monitor_thread) {
+    if (monitor_thread && !IS_ERR(monitor_thread)) {
         kthread_stop(monitor_thread);
         monitor_thread = NULL;
     }
     mutex_unlock(&esp32_lock);
 
-    usb_deregister(&esp32_usb_driver);
-    kobject_uevent(&cpu_dev.this_device->kobj, KOBJ_REMOVE);
     misc_deregister(&cpu_dev);
-
-    pr_info("ESP32_MONITOR: Kernel Driver Unloaded\n");
+    pr_info("ESP32_MONITOR: Driver Unloaded\n");
 }
 
 module_init(cpu_monitor_init);
